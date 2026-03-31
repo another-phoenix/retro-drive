@@ -1,0 +1,994 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>8-Bit Open World Drive</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #222;
+            color: white;
+            font-family: 'Courier New', Courier, monospace;
+            user-select: none;
+        }
+        canvas {
+            display: block;
+            image-rendering: pixelated; /* Keeps it chunky */
+        }
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            pointer-events: none;
+            text-shadow: 2px 2px 0px #000;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px 20px;
+            border-radius: 8px;
+            border: 2px solid #555;
+        }
+        h2 { margin: 0 0 5px 0; color: #ffeb3b; }
+        p { margin: 5px 0; font-size: 14px; }
+        .legend span { display: inline-block; width: 12px; height: 12px; margin-right: 5px; vertical-align: middle; }
+        #hud {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px 20px;
+            border-radius: 8px;
+            border: 2px solid #4CAF50;
+            pointer-events: none;
+            font-size: 18px;
+            font-weight: bold;
+        }
+        .hud-row { margin: 5px 0; }
+        .hud-val { color: #00ff00; font-family: monospace; float: right; margin-left: 20px; }
+        #leaderboard {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px 20px;
+            border-radius: 8px;
+            border: 2px solid #ffeb3b;
+            pointer-events: none;
+            font-size: 14px;
+            min-width: 160px;
+        }
+        .lb-title { text-align: center; color: #ffeb3b; font-weight: bold; margin-bottom: 10px; font-size: 16px; text-shadow: 1px 1px 0 #000; }
+        .lb-row { margin: 4px 0; clear: both; overflow: hidden; }
+        .lb-name { font-weight: bold; float: left; text-shadow: 1px 1px 0 #000; }
+        .lb-score { color: #00ff00; font-family: monospace; float: right; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <h2>Retro Drive</h2>
+        <p><b>Arrows:</b> Drive & Steer</p>
+        <p class="legend"><span style="background: #ff8800;"></span> Jump Ramp</p>
+        <p class="legend"><span style="background: #8b4513;"></span> Destructible Crate</p>
+        <p class="legend"><span style="background: #777;"></span> Solid Wall</p>
+        <p class="legend"><span style="background: #4a3320; border-radius: 50%;"></span> Mud Puddle</p>
+        <p class="legend"><span style="background: #2196F3;"></span> NPC Cars</p>
+    </div>
+
+    <!-- New HUD Element -->
+    <div id="hud">
+        <div class="hud-row">SCORE: <span id="hud-score" class="hud-val">0</span></div>
+        <div class="hud-row">HEALTH: <span id="hud-health" class="hud-val">100</span></div>
+        <div class="hud-row">SPEED: <span id="hud-speed" class="hud-val">0.0</span></div>
+        <div class="hud-row">TOP SPEED: <span id="hud-maxspeed" class="hud-val">10.0</span></div>
+        <div class="hud-row">CRATES: <span id="hud-crates" class="hud-val">0</span></div>
+    </div>
+
+    <!-- New Leaderboard Element -->
+    <div id="leaderboard">
+        <div class="lb-title">TOP 5 SCORERS</div>
+        <div id="lb-content"></div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            ctx.imageSmoothingEnabled = false; 
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // Input
+        const keys = { ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false };
+        window.addEventListener('keydown', (e) => { if(keys.hasOwnProperty(e.key)) keys[e.key] = true; });
+        window.addEventListener('keyup', (e) => { if(keys.hasOwnProperty(e.key)) keys[e.key] = false; });
+
+        // World setup
+        const worldSize = 2500;
+        const worldObjects = [];
+        const npcs = [];
+        const particles = [];
+        const floatingTexts = []; // Array to hold floating text animations
+        const skidMarks = []; // Array to hold tire skid marks
+
+        function createExplosion(x, y) {
+            for (let i = 0; i < 30; i++) {
+                particles.push({
+                    x: x, y: y,
+                    vx: (Math.random() - 0.5) * 12,
+                    vy: (Math.random() - 0.5) * 12,
+                    life: 1.0,
+                    decay: Math.random() * 0.02 + 0.01,
+                    color: Math.random() > 0.5 ? '#ff8800' : '#ff0000',
+                    size: Math.random() * 5 + 2
+                });
+            }
+        }
+
+        function addFloatingText(x, y, text, color, customLife = 60) {
+            floatingTexts.push({
+                x: x,
+                y: y - 20, // Start slightly above the car
+                text: text,
+                color: color,
+                life: customLife, // Variable duration
+                maxLife: customLife
+            });
+        }
+
+        function spawnSkidMarks(c) {
+            // Find the position of the rear wheels
+            let backX = c.x - Math.cos(c.angle) * (c.width / 2 - 4);
+            let backY = c.y - Math.sin(c.angle) * (c.width / 2 - 4);
+            
+            // Calculate left and right wheel offsets
+            let leftX = backX + Math.cos(c.angle - Math.PI / 2) * (c.height / 2 - 4);
+            let leftY = backY + Math.sin(c.angle - Math.PI / 2) * (c.height / 2 - 4);
+            
+            let rightX = backX + Math.cos(c.angle + Math.PI / 2) * (c.height / 2 - 4);
+            let rightY = backY + Math.sin(c.angle + Math.PI / 2) * (c.height / 2 - 4);
+
+            skidMarks.push({
+                x1: leftX, y1: leftY,
+                x2: rightX, y2: rightY,
+                life: 150, // Fades over ~2.5 seconds
+                maxLife: 150
+            });
+        }
+
+        // Stats tracking
+        let playerStats = { crashes: 0, cratesSmashed: 0, jumps: 0, healthCrates: 0, speedCrates: 0, sadCrates: 0 };
+        
+        // HUD DOM Elements
+        const hudScore = document.getElementById('hud-score');
+        const hudHealth = document.getElementById('hud-health');
+        const hudSpeed = document.getElementById('hud-speed');
+        const hudMaxSpeed = document.getElementById('hud-maxspeed');
+        const hudCrates = document.getElementById('hud-crates');
+
+        // Player Car
+        const car = {
+            x: 0, y: 0,
+            vx: 0, vy: 0,
+            angle: -Math.PI / 2, 
+            z: 0, vz: 0,
+            width: 32, height: 20, // Length is width here (facing right at angle 0)
+            radius: 14,
+            maxSpeed: 10,
+            accel: 0.4,
+            friction: 0.92,
+            turnSpeed: 0.08,
+            color: '#cc0000',
+            health: 100,
+            dead: false,
+            deadTimer: 0,
+            mudTimer: 0, // New property for mud effect
+            score: 0,
+            name: 'PLAYER'
+        };
+
+        // Initialize World
+        function initWorld() {
+            // Generate Mud Puddles
+            for (let i = 0; i < 150; i++) {
+                worldObjects.push({
+                    x: (Math.random() - 0.5) * worldSize * 2,
+                    y: (Math.random() - 0.5) * worldSize * 2,
+                    type: 'puddle',
+                    color: '#4a3320', 
+                    radius: 30 + Math.random() * 50, // Varying size (30 to 80 radius)
+                    active: true
+                });
+            }
+
+            // Generate Obstacles
+            for (let i = 0; i < 400; i++) {
+                let typeRandom = Math.random();
+                let type = 'indestructible';
+                let color = '#777'; 
+                let radius = 20 + Math.random() * 10;
+
+                if (typeRandom > 0.8) {
+                    type = 'jump';
+                    color = '#ff8800'; 
+                    radius = 25;
+                } else if (typeRandom > 0.5) {
+                    type = 'destructible';
+                    color = '#8b4513'; 
+                    radius = 16;
+                }
+
+                worldObjects.push({
+                    x: (Math.random() - 0.5) * worldSize * 2,
+                    y: (Math.random() - 0.5) * worldSize * 2,
+                    type: type,
+                    color: color,
+                    radius: radius,
+                    active: true
+                });
+            }
+
+            // Generate NPC Cars
+            const npcColors = ['#2196F3', '#9C27B0', '#009688', '#FFEB3B', '#FF9800'];
+            for (let i = 0; i < 40; i++) {
+                npcs.push({
+                    x: (Math.random() - 0.5) * worldSize * 2,
+                    y: (Math.random() - 0.5) * worldSize * 2,
+                    vx: 0, vy: 0,
+                    angle: Math.random() * Math.PI * 2,
+                    targetAngle: 0,
+                    z: 0, vz: 0,
+                    width: 30, height: 18,
+                    radius: 14,
+                    speed: 8 + Math.random() * 4, // Higher max speed to fight friction
+                    accel: 0.3 + Math.random() * 0.2, // Individual acceleration
+                    friction: 0.92, // Same road friction as player
+                    color: npcColors[Math.floor(Math.random() * npcColors.length)],
+                    timer: 0,
+                    health: 100,
+                    dead: false,
+                    deadTimer: 0,
+                    mudTimer: 0, // New property for NPC mud effect
+                    cratesSmashed: 0,
+                    healthCrates: 0,
+                    speedCrates: 0,
+                    sadCrates: 0,
+                    score: 0,
+                    name: 'NPC ' + (i + 1),
+                    evadeTimer: 0
+                });
+            }
+        }
+
+        // Generic Car Drawing Function
+        function drawCarObject(c) {
+            ctx.save();
+            ctx.translate(c.x, c.y);
+            
+            // Draw Health Bar
+            ctx.fillStyle = '#ff0000';
+            ctx.fillRect(-15, -c.height/2 - c.z - 10, 30, 4);
+            ctx.fillStyle = '#00ff00';
+            ctx.fillRect(-15, -c.height/2 - c.z - 10, 30 * (c.health / 100), 4);
+
+            // Draw Shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.save();
+            ctx.rotate(c.angle);
+            ctx.fillRect(-c.width/2 + c.z/2, -c.height/2 + c.z/2, c.width, c.height);
+            ctx.restore();
+
+            // Simulate Jump Height
+            let scale = 1 + (c.z * 0.015);
+            ctx.scale(scale, scale);
+            ctx.rotate(c.angle);
+
+            // Car Body
+            ctx.fillStyle = c.color;
+            ctx.fillRect(-c.width / 2, -c.height / 2, c.width, c.height);
+            
+            // Roof
+            ctx.fillStyle = 'rgba(0,0,0,0.2)';
+            ctx.fillRect(-c.width / 4, -c.height / 2 + 2, c.width / 2, c.height - 4);
+            
+            // Windshield (facing right)
+            ctx.fillStyle = '#00ccff';
+            ctx.fillRect(c.width / 4, -c.height / 2 + 3, 6, c.height - 6);
+            
+            // Rear window
+            ctx.fillStyle = '#111';
+            ctx.fillRect(-c.width / 4 - 4, -c.height / 2 + 4, 4, c.height - 8);
+
+            // Headlights
+            ctx.fillStyle = '#ffff00';
+            ctx.fillRect(c.width / 2 - 4, -c.height / 2 + 1, 4, 4);
+            ctx.fillRect(c.width / 2 - 4, c.height / 2 - 5, 4, 4);
+
+            ctx.restore();
+        }
+
+        let frameCount = 0;
+
+        function update() {
+            frameCount++;
+            // --- PARTICLES ---
+            for (let i = particles.length - 1; i >= 0; i--) {
+                let p = particles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= p.decay;
+                if (p.life <= 0) particles.splice(i, 1);
+            }
+
+            // --- FLOATING TEXTS ---
+            for (let i = floatingTexts.length - 1; i >= 0; i--) {
+                let ft = floatingTexts[i];
+                ft.y -= 1; // Float upwards
+                ft.life--;
+                if (ft.life <= 0) floatingTexts.splice(i, 1);
+            }
+
+            // --- SKID MARKS ---
+            for (let i = skidMarks.length - 1; i >= 0; i--) {
+                skidMarks[i].life--;
+                if (skidMarks[i].life <= 0) skidMarks.splice(i, 1);
+            }
+
+            // --- CRATE RESPAWNS ---
+            for (let obj of worldObjects) {
+                if (!obj.active && obj.type === 'destructible') {
+                    if (obj.respawnTimer > 0) {
+                        obj.respawnTimer--;
+                    } else {
+                        obj.active = true; // Respawn crate
+                    }
+                }
+            }
+
+            // --- PLAYER DEATH & RESPAWN ---
+            if (car.health <= 0 && !car.dead) {
+                car.dead = true;
+                car.deadTimer = 300; // 5 seconds at 60fps
+                car.vx = 0; car.vy = 0;
+                // Penalize score for dying
+                car.score = Math.max(0, car.score - 500); 
+                addFloatingText(car.x, car.y - 15, "-500 PTS", "#ff0000");
+                createExplosion(car.x, car.y);
+            }
+            if (car.dead) {
+                car.deadTimer--;
+                if (car.deadTimer <= 0) {
+                    car.dead = false;
+                    car.health = 100;
+                    car.mudTimer = 0;
+                    car.x = (Math.random() - 0.5) * worldSize * 2;
+                    car.y = (Math.random() - 0.5) * worldSize * 2;
+                }
+            }
+
+            // --- PLAYER PHYSICS & MOVEMENT ---
+            if (car.mudTimer > 0) car.mudTimer--;
+
+            if (car.z === 0 && !car.dead) {
+                // Calculate performance penalty based on health and mud
+                let healthFactor = 0.3 + 0.7 * (car.health / 100);
+                let mudFactor = car.mudTimer > 0 ? 0.5 : 1.0; // 50% penalty in mud
+
+                let currentAccel = car.accel * healthFactor * mudFactor;
+                let currentTurnSpeed = car.turnSpeed * healthFactor * mudFactor;
+                let currentMaxSpeed = car.maxSpeed * healthFactor * mudFactor;
+
+                // Acceleration
+                if (keys.ArrowUp) {
+                    car.vx += Math.cos(car.angle) * currentAccel;
+                    car.vy += Math.sin(car.angle) * currentAccel;
+                }
+                if (keys.ArrowDown) {
+                    car.vx -= Math.cos(car.angle) * (currentAccel * 0.6); 
+                    car.vy -= Math.sin(car.angle) * (currentAccel * 0.6);
+                }
+
+                // Steering
+                let speed = Math.hypot(car.vx, car.vy);
+                if (speed > 0.5) {
+                    // Reverse turning logic if backing up
+                    let isReversing = (keys.ArrowDown && !keys.ArrowUp && speed > 1);
+                    let dir = isReversing ? -1 : 1; 
+                    if (keys.ArrowLeft) car.angle -= currentTurnSpeed * dir;
+                    if (keys.ArrowRight) car.angle += currentTurnSpeed * dir;
+                }
+
+                // Apply friction only when on the ground to preserve jump momentum
+                car.vx *= car.friction;
+                car.vy *= car.friction;
+
+                // Enforce maxSpeed limit (so the speed powerup works)
+                let currentSpeed = Math.hypot(car.vx, car.vy);
+                if (currentSpeed > currentMaxSpeed) {
+                    car.vx = (car.vx / currentSpeed) * currentMaxSpeed;
+                    car.vy = (car.vy / currentSpeed) * currentMaxSpeed;
+                }
+            }
+
+            // Update position (happens in air and on ground)
+            car.x += car.vx;
+            car.y += car.vy;
+
+            // Skid marks check (Player)
+            if (car.z === 0 && !car.dead) {
+                let isTurning = keys.ArrowLeft || keys.ArrowRight;
+                let currentSpeed = Math.hypot(car.vx, car.vy);
+                let healthFactor = 0.3 + 0.7 * (car.health / 100);
+                let mudFactor = car.mudTimer > 0 ? 0.5 : 1.0;
+                
+                // Calculate the actual top speed achievable against friction
+                let currentMaxSpeed = car.maxSpeed * healthFactor * mudFactor;
+                let currentAccel = car.accel * healthFactor * mudFactor;
+                let achievableTopSpeed = (currentAccel * car.friction) / (1 - car.friction);
+                let effectiveTopSpeed = Math.min(currentMaxSpeed, achievableTopSpeed);
+                
+                // Leave tracks if turning hard at over 87% of current top speed, AND not muddy
+                if (isTurning && currentSpeed > effectiveTopSpeed * 0.87 && car.mudTimer <= 0) {
+                    spawnSkidMarks(car);
+                }
+            }
+
+            // Player Jump Logic
+            if (car.z > 0 || car.vz > 0) {
+                car.vz -= 0.6; // Gravity
+                car.z += car.vz;
+                if (car.z < 0) {
+                    car.z = 0; car.vz = 0;
+                }
+            }
+
+            // --- HUD UPDATE ---
+            hudScore.innerText = car.score;
+            if (car.dead) {
+                hudHealth.innerText = "0";
+                hudHealth.style.color = "#ff0000";
+                hudSpeed.innerText = "0.0";
+            } else {
+                hudHealth.innerText = Math.floor(car.health);
+                // Dynamically color the health value
+                if (car.health > 60) hudHealth.style.color = "#00ff00";
+                else if (car.health > 25) hudHealth.style.color = "#ffff00";
+                else hudHealth.style.color = "#ff0000";
+                
+                hudSpeed.innerText = Math.hypot(car.vx, car.vy).toFixed(1);
+            }
+            
+            hudMaxSpeed.innerText = car.maxSpeed.toFixed(1);
+            hudCrates.innerText = playerStats.cratesSmashed;
+
+            let allCars = [car, ...npcs];
+
+            // --- LEADERBOARD UPDATE ---
+            // Update every 15 frames for performance
+            if (frameCount % 15 === 0) {
+                // Copy array so we don't mutate rendering order, then sort by score
+                let sortedCars = [...allCars].sort((a, b) => b.score - a.score); 
+                let top5 = sortedCars.slice(0, 5);
+                let lbHtml = '';
+                top5.forEach((c, index) => {
+                    let color = c === car ? '#00ff00' : c.color;
+                    lbHtml += `<div class="lb-row"><span class="lb-name" style="color: ${color}">${index + 1}. ${c.name}</span> <span class="lb-score">${c.score}</span></div>`;
+                });
+                document.getElementById('lb-content').innerHTML = lbHtml;
+            }
+
+            // --- NPC AI & MOVEMENT ---
+            // Find current leader for AI targeting
+            let aliveCars = allCars.filter(c => !c.dead);
+            let leader = null;
+            if (aliveCars.length > 0) {
+                let maxScorer = aliveCars.reduce((max, c) => c.score > max.score ? c : max, aliveCars[0]);
+                // Only target if someone has actually scored points!
+                if (maxScorer.score > 0) leader = maxScorer; 
+            }
+
+            for (let npc of npcs) {
+                if (npc.health <= 0 && !npc.dead) {
+                    npc.dead = true;
+                    npc.deadTimer = 300;
+                    npc.vx = 0; npc.vy = 0;
+                    // Penalize NPC score for dying
+                    npc.score = Math.max(0, npc.score - 500); 
+                    createExplosion(npc.x, npc.y);
+                }
+
+                if (npc.dead) {
+                    npc.deadTimer--;
+                    if (npc.deadTimer <= 0) {
+                        npc.dead = false;
+                        npc.health = 100;
+                        npc.mudTimer = 0;
+                        npc.x = (Math.random() - 0.5) * worldSize * 2;
+                        npc.y = (Math.random() - 0.5) * worldSize * 2;
+                    }
+                    continue; // Skip AI and movement logic if dead
+                }
+
+                if (npc.mudTimer > 0) npc.mudTimer--;
+                if (npc.evadeTimer > 0) npc.evadeTimer--;
+
+                // Calculate NPC performance penalty
+                let npcHealthFactor = 0.3 + 0.7 * (npc.health / 100);
+                let npcMudFactor = npc.mudTimer > 0 ? 0.5 : 1.0;
+
+                if (npc.z === 0) {
+                    // --- EVASION LOGIC (50% Chance to avoid Mud/Walls) ---
+                    if (npc.evadeTimer <= 0) {
+                        let lookAhead = 70; // Predict position ahead of the car
+                        let hx = npc.x + Math.cos(npc.angle) * lookAhead;
+                        let hy = npc.y + Math.sin(npc.angle) * lookAhead;
+
+                        for (let obj of worldObjects) {
+                            if (!obj.active || (obj.type !== 'indestructible' && obj.type !== 'puddle')) continue;
+                            
+                            let dist = Math.hypot(hx - obj.x, hy - obj.y);
+                            if (dist < obj.radius + npc.radius + 10) {
+                                npc.evadeTimer = 45; // Cooldown before making another evasion decision
+                                
+                                if (Math.random() < 0.5) { // 50% chance to avoid
+                                    // Determine which way to steer to dodge
+                                    let angleToObj = Math.atan2(obj.y - npc.y, obj.x - npc.x);
+                                    let evadeDir = Math.sin(npc.angle - angleToObj) > 0 ? 1 : -1; 
+                                    npc.targetAngle = npc.angle + evadeDir * (Math.PI / 2); // Turn sharply away
+                                    npc.timer = 40; // Override AI wander timer to hold this turn
+                                }
+                                break; // Only react to the first detected obstacle
+                            }
+                        }
+                    }
+
+                    npc.timer--;
+                    // Randomly wander OR target leader
+                    if (npc.timer <= 0) {
+                        if (leader && leader !== npc) {
+                            // Target the highest scorer! Calculate absolute angle to leader
+                            let absoluteTargetAngle = Math.atan2(leader.y - npc.y, leader.x - npc.x);
+                            
+                            // Prevent NPC from rapidly spinning by calculating the shortest rotational difference
+                            let diff = absoluteTargetAngle - (npc.angle % (Math.PI * 2));
+                            if (diff > Math.PI) diff -= Math.PI * 2;
+                            if (diff < -Math.PI) diff += Math.PI * 2;
+                            
+                            // Steer toward leader with slight jitter so they don't form a perfect single-file line
+                            npc.targetAngle = npc.angle + diff + (Math.random() - 0.5) * 0.5;
+                            npc.timer = 15 + Math.random() * 20; // Re-evaluate target frequently
+                        } else {
+                            // Randomly wander if there is no leader, or if they are the leader themselves
+                            npc.targetAngle = npc.angle + (Math.random() - 0.5) * 2; 
+                            npc.timer = 30 + Math.random() * 60; 
+                        }
+                    }
+
+                    // Smooth steering for NPC (sluggish when damaged)
+                    let angleDiff = npc.targetAngle - npc.angle;
+                    npc.angle += angleDiff * (0.05 * npcHealthFactor * npcMudFactor);
+
+                    // Drive forward using acceleration (momentum) instead of setting velocity
+                    let currentAccel = npc.accel * npcHealthFactor * npcMudFactor;
+                    npc.vx += Math.cos(npc.angle) * currentAccel;
+                    npc.vy += Math.sin(npc.angle) * currentAccel;
+
+                    // Apply friction
+                    npc.vx *= npc.friction;
+                    npc.vy *= npc.friction;
+
+                    // Enforce maxSpeed limit
+                    let currentMaxSpeed = npc.speed * npcHealthFactor * npcMudFactor;
+                    let currentSpeed = Math.hypot(npc.vx, npc.vy);
+                    if (currentSpeed > currentMaxSpeed) {
+                        npc.vx = (npc.vx / currentSpeed) * currentMaxSpeed;
+                        npc.vy = (npc.vy / currentSpeed) * currentMaxSpeed;
+                    }
+                }
+
+                npc.x += npc.vx;
+                npc.y += npc.vy;
+
+                // Skid marks check (NPCs)
+                if (npc.z === 0 && !npc.dead) {
+                    let npcSpeed = Math.hypot(npc.vx, npc.vy);
+                    let npcMaxSpeed = npc.speed * npcHealthFactor * npcMudFactor;
+                    
+                    // Calculate achievable top speed against friction
+                    let currentAccel = npc.accel * npcHealthFactor * npcMudFactor;
+                    let achievableTopSpeed = (currentAccel * npc.friction) / (1 - npc.friction);
+                    let effectiveTopSpeed = Math.min(npcMaxSpeed, achievableTopSpeed);
+                    
+                    // Check if NPC is adjusting its angle significantly
+                    let normDiff = Math.abs((npc.targetAngle - npc.angle) % (Math.PI * 2));
+                    if (normDiff > Math.PI) normDiff = Math.PI * 2 - normDiff;
+                    
+                    // Check against friction-adjusted effective top speed, AND not muddy
+                    if (normDiff > 0.05 && npcSpeed > effectiveTopSpeed * 0.95 && npc.mudTimer <= 0) {
+                        spawnSkidMarks(npc);
+                    }
+                }
+
+                // NPC Jump Logic
+                if (npc.z > 0 || npc.vz > 0) {
+                    npc.vz -= 0.6;
+                    npc.z += npc.vz;
+                    if (npc.z < 0) { npc.z = 0; npc.vz = 0; }
+                }
+
+                // Wrap NPCs around the world if they wander too far
+                if (npc.x > worldSize) npc.x = -worldSize;
+                if (npc.x < -worldSize) npc.x = worldSize;
+                if (npc.y > worldSize) npc.y = -worldSize;
+                if (npc.y < -worldSize) npc.y = worldSize;
+            }
+
+            // --- COLLISIONS ---
+            
+            // 1. Player vs World Objects
+            if (car.z === 0 && !car.dead) {
+                for (let obj of worldObjects) {
+                    if (!obj.active) continue;
+                    let dx = car.x - obj.x;
+                    let dy = car.y - obj.y;
+                    let dist = Math.hypot(dx, dy);
+
+                    if (dist < car.radius + obj.radius) {
+                        if (obj.type === 'puddle') {
+                            if (car.mudTimer <= 0) addFloatingText(car.x, car.y, "MUD!", "#4a3320");
+                            car.mudTimer = 420; // 7 seconds (60 frames * 7)
+                        } else if (obj.type === 'jump') {
+                            car.vz = 9; // Launch!
+                            playerStats.jumps++;
+                            car.score += 100;
+                            addFloatingText(car.x, car.y - 15, "+100 PTS", "#ffff00");
+                            
+                            let oldHealth = car.health;
+                            car.health = Math.min(100, car.health + 1);
+                            if (car.health > oldHealth) addFloatingText(car.x, car.y, "+1 HP", "#00ff00");
+                        } else if (obj.type === 'destructible') {
+                            obj.active = false; 
+                            obj.respawnTimer = 600; // 10 seconds to respawn
+                            car.vx *= 0.5; // Slow down
+                            car.vy *= 0.5;
+                            playerStats.cratesSmashed++;
+                            car.score += 50;
+                            addFloatingText(car.x, car.y - 15, "+50 PTS", "#ffff00");
+
+                            // Powerup Logic
+                            let r = Math.random();
+                            if (r < 0.17) {
+                                playerStats.healthCrates++;
+                                // 1. Health: random increase between 10 and 15
+                                let hpBoost = Math.floor(Math.random() * 6) + 10;
+                                let oldHealth = car.health;
+                                car.health = Math.min(100, car.health + hpBoost);
+                                if (car.health > oldHealth) {
+                                    addFloatingText(car.x, car.y, "+" + (car.health - oldHealth) + " HP", "#00ff00");
+                                }
+                            } else if (r < 0.25) { // 0.17 + 0.08 = 0.25
+                                playerStats.speedCrates++;
+                                // 2. Max speed increase: factor of 1.1
+                                car.maxSpeed *= 1.1;
+                                car.accel *= 1.1; // Boost acceleration to actually reach the new max speed!
+                                addFloatingText(car.x, car.y, "+SPEED", "#00ffff");
+                            } else { // 75% chance
+                                playerStats.sadCrates++;
+                                // 3. No powerup: sad face animation (3 sec = 180 frames)
+                                addFloatingText(car.x, car.y, "😢", "#aaaaaa", 180);
+                            }
+
+                        } else if (obj.type === 'indestructible') {
+                            // Push out
+                            car.x += (dx / dist) * 5; 
+                            car.y += (dy / dist) * 5;
+                            car.vx *= -0.5; // Bounce
+                            car.vy *= -0.5;
+                            let oldHealth = car.health;
+                            car.health = Math.max(0, car.health - 7);
+                            if (car.health < oldHealth) addFloatingText(car.x, car.y, "-7 HP", "#ff0000");
+                        }
+                    }
+                }
+            }
+
+            // 2. NPCs vs World Objects
+            for (let npc of npcs) {
+                if (npc.z !== 0 || npc.dead) continue;
+                for (let obj of worldObjects) {
+                    if (!obj.active) continue;
+                    let dx = npc.x - obj.x;
+                    let dy = npc.y - obj.y;
+                    let dist = Math.hypot(dx, dy);
+
+                    if (dist < npc.radius + obj.radius) {
+                        if (obj.type === 'puddle') {
+                            npc.mudTimer = 420;
+                        } else if (obj.type === 'jump') {
+                            npc.vz = 7;
+                            npc.score += 100;
+                            npc.health = Math.min(100, npc.health + 1);
+                        } else if (obj.type === 'destructible') {
+                            obj.active = false;
+                            obj.respawnTimer = 600; // Ensure they respawn when NPCs hit them too
+                            npc.cratesSmashed++;
+                            npc.score += 50;
+
+                            // NPC Powerup Logic
+                            let r = Math.random();
+                            if (r < 0.17) {
+                                npc.healthCrates++;
+                                npc.health = Math.min(100, npc.health + Math.floor(Math.random() * 6) + 10);
+                            } else if (r < 0.25) {
+                                npc.speedCrates++;
+                                npc.speed *= 1.1;
+                                npc.accel *= 1.1;
+                            } else {
+                                npc.sadCrates++;
+                            }
+                        } else if (obj.type === 'indestructible') {
+                            npc.x += (dx / dist) * 2; 
+                            npc.y += (dy / dist) * 2;
+                            npc.vx *= -0.5; // Bounce momentum!
+                            npc.vy *= -0.5;
+                            npc.angle += Math.PI; // Turn around!
+                            npc.targetAngle = npc.angle;
+                            npc.health = Math.max(0, npc.health - 7);
+                        }
+                    }
+                }
+            }
+
+            // 3. Player vs NPCs
+            if (car.z === 0 && !car.dead) {
+                for (let npc of npcs) {
+                    if (npc.z !== 0 || npc.dead) continue;
+                    let dx = car.x - npc.x;
+                    let dy = car.y - npc.y;
+                    let dist = Math.hypot(dx, dy);
+
+                    if (dist < car.radius + npc.radius) {
+                        // Crash! Health logic
+                        let playerSpeed = Math.hypot(car.vx, car.vy);
+                        let npcSpeed = Math.hypot(npc.vx, npc.vy);
+                        let oldHealth = car.health;
+                        
+                        if (playerSpeed >= npcSpeed) {
+                            car.health = Math.min(100, car.health + 3);
+                            npc.health = Math.max(0, npc.health - 2);
+                            car.score += 200;
+                            addFloatingText(car.x, car.y - 15, "+200 PTS", "#ffff00");
+                            if (car.health > oldHealth) addFloatingText(car.x, car.y, "+3 HP", "#00ff00");
+                        } else {
+                            npc.health = Math.min(100, npc.health + 3);
+                            car.health = Math.max(0, car.health - 2);
+                            npc.score += 200;
+                            if (car.health < oldHealth) addFloatingText(car.x, car.y, "-2 HP", "#ff0000");
+                        }
+
+                        // Bounce off each other
+                        car.x += (dx / dist) * 3;
+                        car.y += (dy / dist) * 3;
+                        car.vx *= -0.4;
+                        car.vy *= -0.4;
+                        
+                        npc.x -= (dx / dist) * 3;
+                        npc.y -= (dy / dist) * 3;
+                        npc.vx *= -0.4; // NPC loses momentum from crash
+                        npc.vy *= -0.4;
+                        npc.angle += Math.PI / 2; // NPC spins out
+                        npc.targetAngle = npc.angle;
+
+                        playerStats.crashes++;
+                    }
+                }
+            }
+
+            // 4. NPC vs NPC Collisions
+            for (let i = 0; i < npcs.length; i++) {
+                let npc1 = npcs[i];
+                if (npc1.z !== 0 || npc1.dead) continue;
+                for (let j = i + 1; j < npcs.length; j++) {
+                    let npc2 = npcs[j];
+                    if (npc2.z !== 0 || npc2.dead) continue;
+                    
+                    let dx = npc1.x - npc2.x;
+                    let dy = npc1.y - npc2.y;
+                    let dist = Math.hypot(dx, dy);
+
+                    if (dist < npc1.radius + npc2.radius) {
+                        // Crash! Health logic
+                        let speed1 = Math.hypot(npc1.vx, npc1.vy);
+                        let speed2 = Math.hypot(npc2.vx, npc2.vy);
+                        
+                        if (speed1 >= speed2) {
+                            npc1.health = Math.min(100, npc1.health + 3);
+                            npc2.health = Math.max(0, npc2.health - 2);
+                            npc1.score += 200;
+                        } else {
+                            npc2.health = Math.min(100, npc2.health + 3);
+                            npc1.health = Math.max(0, npc1.health - 2);
+                            npc2.score += 200;
+                        }
+
+                        // Bounce off each other
+                        npc1.x += (dx / dist) * 2;
+                        npc1.y += (dy / dist) * 2;
+                        npc1.vx *= -0.4;
+                        npc1.vy *= -0.4;
+                        npc1.angle += Math.PI / 2;
+                        npc1.targetAngle = npc1.angle;
+
+                        npc2.x -= (dx / dist) * 2;
+                        npc2.y -= (dy / dist) * 2;
+                        npc2.vx *= -0.4;
+                        npc2.vy *= -0.4;
+                        npc2.angle += Math.PI / 2;
+                        npc2.targetAngle = npc2.angle;
+                    }
+                }
+            }
+        }
+
+        function draw() {
+            // Grass Background
+            ctx.fillStyle = '#4CAF50';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.save();
+            // Camera follow player
+            ctx.translate(canvas.width / 2 - car.x, canvas.height / 2 - car.y);
+
+            // Grid for speed reference
+            ctx.fillStyle = '#3e8e41';
+            const startX = Math.floor((car.x - canvas.width/2) / 100) * 100;
+            const startY = Math.floor((car.y - canvas.height/2) / 100) * 100;
+            const endX = startX + canvas.width + 200;
+            const endY = startY + canvas.height + 200;
+
+            for(let gx = startX; gx < endX; gx += 100) {
+                for(let gy = startY; gy < endY; gy += 100) {
+                    ctx.fillRect(gx - 2, gy - 2, 4, 4);
+                }
+            }
+
+            // Draw Ground Elements (Puddles) first so they are under everything else
+            for (let obj of worldObjects) {
+                if (!obj.active || obj.type !== 'puddle') continue;
+                if (obj.x > car.x + canvas.width/2 + obj.radius || obj.x < car.x - canvas.width/2 - obj.radius ||
+                    obj.y > car.y + canvas.height/2 + obj.radius || obj.y < car.y - canvas.height/2 - obj.radius) continue;
+
+                ctx.fillStyle = obj.color;
+                ctx.beginPath();
+                ctx.arc(obj.x, obj.y, obj.radius, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Add a slightly darker muddy center detail
+                ctx.fillStyle = 'rgba(0,0,0,0.15)';
+                ctx.beginPath();
+                ctx.arc(obj.x - obj.radius * 0.15, obj.y + obj.radius * 0.15, obj.radius * 0.5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Draw Skid Marks
+            for (let sm of skidMarks) {
+                // Only draw if visible on screen to save performance
+                if (sm.x1 > car.x + canvas.width/2 + 50 || sm.x1 < car.x - canvas.width/2 - 50 ||
+                    sm.y1 > car.y + canvas.height/2 + 50 || sm.y1 < car.y - canvas.height/2 - 50) continue;
+
+                // Opacity fades out based on remaining life
+                ctx.fillStyle = `rgba(0, 0, 0, ${(sm.life / sm.maxLife) * 0.4})`;
+                ctx.fillRect(sm.x1 - 1, sm.y1 - 1, 3, 3); // Left tire
+                ctx.fillRect(sm.x2 - 1, sm.y2 - 1, 3, 3); // Right tire
+            }
+
+            // Draw Obstacles (sort by Y axis to fake depth, though strictly top-down it matters less)
+            for (let obj of worldObjects) {
+                if (!obj.active || obj.type === 'puddle') continue;
+                // Only draw if visible on screen
+                if (obj.x > car.x + canvas.width/2 + 50 || obj.x < car.x - canvas.width/2 - 50 ||
+                    obj.y > car.y + canvas.height/2 + 50 || obj.y < car.y - canvas.height/2 - 50) continue;
+
+                ctx.fillStyle = obj.color;
+                let size = obj.radius * 2;
+                
+                // Draw drop shadow for objects
+                ctx.fillStyle = 'rgba(0,0,0,0.3)';
+                ctx.fillRect(obj.x - obj.radius + 4, obj.y - obj.radius + 4, size, size);
+
+                // Draw Object
+                ctx.fillStyle = obj.color;
+                ctx.fillRect(obj.x - obj.radius, obj.y - obj.radius, size, size);
+                
+                // Highlight
+                ctx.fillStyle = 'rgba(255,255,255,0.2)';
+                ctx.fillRect(obj.x - obj.radius, obj.y - obj.radius, size, size / 4);
+                
+                // Outline
+                ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(obj.x - obj.radius, obj.y - obj.radius, size, size);
+            }
+
+            // Draw NPCs
+            for (let npc of npcs) {
+                if (npc.dead) continue;
+                // Only draw if visible on screen
+                if (npc.x > car.x + canvas.width/2 + 50 || npc.x < car.x - canvas.width/2 - 50 ||
+                    npc.y > car.y + canvas.height/2 + 50 || npc.y < car.y - canvas.height/2 - 50) continue;
+                drawCarObject(npc);
+            }
+
+            // Draw Player
+            if (!car.dead) {
+                drawCarObject(car);
+            } else {
+                // Draw Respawn Countdown Text
+                ctx.save();
+                ctx.translate(car.x, car.y);
+                ctx.fillStyle = "#ffffff";
+                ctx.strokeStyle = "#000000";
+                ctx.lineWidth = 4;
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                
+                // Big number
+                ctx.font = "bold 48px 'Courier New'";
+                let seconds = Math.ceil(car.deadTimer / 60);
+                ctx.strokeText(seconds, 0, -10);
+                ctx.fillText(seconds, 0, -10);
+                
+                // "RESPAWNING" text
+                ctx.font = "bold 16px 'Courier New'";
+                ctx.strokeText("RESPAWNING...", 0, 25);
+                ctx.fillText("RESPAWNING...", 0, 25);
+                ctx.restore();
+            }
+
+            // Draw Particles
+            for (let p of particles) {
+                ctx.fillStyle = p.color;
+                ctx.globalAlpha = Math.max(0, p.life);
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.globalAlpha = 1.0;
+
+            // Draw Floating Texts
+            for (let ft of floatingTexts) {
+                ctx.save();
+                ctx.globalAlpha = ft.life / ft.maxLife; // Fade out over time
+                ctx.fillStyle = ft.color;
+                ctx.strokeStyle = '#000000';
+                ctx.lineWidth = 3;
+                ctx.font = "bold 20px 'Courier New'";
+                ctx.textAlign = "center";
+                
+                ctx.strokeText(ft.text, ft.x, ft.y);
+                ctx.fillText(ft.text, ft.x, ft.y);
+                ctx.restore();
+            }
+
+            ctx.restore();
+        }
+
+        function gameLoop() {
+            update();
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Start game on load
+        window.onload = () => {
+            initWorld();
+            gameLoop();
+        };
+    </script>
+</body>
+</html>
