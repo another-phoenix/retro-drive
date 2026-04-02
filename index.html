@@ -1035,7 +1035,14 @@
 
         // --- FIREBASE INITIALIZATION & SYNC ---
         async function initMultiplayer() {
-            const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+            const firebaseConfig = {
+              apiKey: "AIzaSyCdqyHU7PhScVD9kTh7XSKBCDqYxKJy2fE",
+              authDomain: "retrodrive-181ed.firebaseapp.com",
+              projectId: "retrodrive-181ed",
+              storageBucket: "retrodrive-181ed.firebasestorage.app",
+              messagingSenderId: "355926128316",
+              appId: "1:355926128316:web:a74795535e4eea7ade42b9"
+            };
             const app = initializeApp(firebaseConfig);
             auth = getAuth(app);
             db = getFirestore(app);
